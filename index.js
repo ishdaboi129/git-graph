@@ -18,20 +18,61 @@ const generateDates = () => {
   return dates;
 };
 
-const writeDataAndCommit = async (date, dryRun) => {
-  const data = { date };
+// Decide commit counts per day: 5% zeros, most days 1-4, occasional spikes up to 13
+const decideCounts = (dates) => {
+  const counts = [];
+  for (const d of dates) {
+    const r = Math.random();
+    if (r < 0.05) {
+      counts.push(0); // 5% no commit days
+      continue;
+    }
+
+    // base distribution skewed towards small numbers
+    const spike = Math.random() < 0.03; // 3% chance of spike
+    if (spike) {
+      // spikes: 6-13
+      counts.push(6 + Math.floor(Math.random() * 8));
+    } else {
+      // typical day: weighted towards 1-3, sometimes 4-5
+      const q = Math.random();
+      if (q < 0.6) counts.push(1 + Math.floor(Math.random() * 2)); // 1-2
+      else if (q < 0.9) counts.push(3 + Math.floor(Math.random() * 2)); // 3-4
+      else counts.push(5 + Math.floor(Math.random() * 1)); // 5
+    }
+  }
+  return counts;
+};
+
+const writeDataAndCommit = async (date, count, dryRun) => {
+  // create `count` commits on the given date by repeatedly writing the file and committing
   if (dryRun) {
-    console.log("[dry-run] would write date:", date);
+    console.log(`[dry-run] ${date} -> ${count} commits`);
     return;
   }
 
-  await jsonfile.writeFile(path, data);
-  try {
-    await simpleGit().add([path]).commit(date, { "--date": date });
-    console.log("committed", date);
-  } catch (err) {
-    console.error("git operation failed for date", date, err.message);
+  for (let i = 0; i < count; i++) {
+    const data = { date };
+    await jsonfile.writeFile(path, data);
+    try {
+      // attach an index to the commit message to keep them unique
+      await simpleGit().add([path]).commit(`${date} ${i + 1}/${count}`, { "--date": date });
+    } catch (err) {
+      console.error("git operation failed for date", date, err.message);
+      return;
+    }
   }
+};
+
+const summarize = (counts) => {
+  const totalDays = counts.length;
+  const totalCommits = counts.reduce((a, b) => a + b, 0);
+  const zeros = counts.filter((c) => c === 0).length;
+  const max = Math.max(...counts);
+  const histogram = {};
+  for (const c of counts) histogram[c] = (histogram[c] || 0) + 1;
+  console.log(`Days: ${totalDays}, Commits total: ${totalCommits}, Zero-days: ${zeros} (${((zeros/totalDays)*100).toFixed(2)}%), Max in a day: ${max}`);
+  console.log("Histogram (commits => days):", histogram);
 };
 
 const main = async () => {
@@ -40,21 +81,32 @@ const main = async () => {
   const push = args.includes("--push");
 
   const dates = generateDates();
-  console.log(`Planning ${dates.length} commits from ${dates[0]} to ${dates[dates.length-1]}`);
+  const counts = decideCounts(dates);
+  summarize(counts);
 
-  for (const date of dates) {
-    // write and commit each day; in dry-run just print
-    await writeDataAndCommit(date, dryRun);
+  if (dryRun) {
+    // show first 10 days as sample
+    console.log("Sample (first 10 days):");
+    for (let i = 0; i < Math.min(10, dates.length); i++) console.log(dates[i], '->', counts[i]);
+    return;
   }
 
-  if (!dryRun && push) {
+  console.log(`Creating commits locally for ${dates.length} days...`);
+  for (let i = 0; i < dates.length; i++) {
+    const date = dates[i];
+    const count = counts[i];
+    if (count === 0) continue;
+    await writeDataAndCommit(date, count, dryRun);
+  }
+
+  if (push) {
     try {
       await simpleGit().push();
       console.log("pushed to remote");
     } catch (err) {
       console.error("push failed:", err.message);
     }
-  } else if (!dryRun && !push) {
+  } else {
     console.log("commits created locally. Run with --push to push to remote.");
   }
 };
